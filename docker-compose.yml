@@ -1,0 +1,56 @@
+version: "3.8"
+
+networks:
+  backup-net:
+
+volumes:
+  postgres_data:
+  backups:
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-backup-demo
+    environment:
+      POSTGRES_DB:       appdb
+      POSTGRES_USER:     appuser
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports: ["5432:5432"]
+    networks: [backup-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U appuser -d appdb"]
+      interval: 10s
+      retries: 5
+
+  # Backup runner — runs backup on schedule via cron
+  backup-runner:
+    image: postgres:16-alpine
+    container_name: backup-runner
+    environment:
+      PGHOST:          postgres
+      PGPORT:          "5432"
+      PGUSER:          appuser
+      PGPASSWORD:      secret
+      PGDATABASE:      appdb
+      BACKUP_DIR:      /backups
+      RETENTION_DAYS:  "7"
+    volumes:
+      - backups:/backups
+      - ./scripts/backup.sh:/scripts/backup.sh:ro
+      - ./scripts/restore.sh:/scripts/restore.sh:ro
+    networks: [backup-net]
+    depends_on:
+      postgres: {condition: service_healthy}
+    # Run backup every hour via cron
+    command: >
+      sh -c "
+        apk add --no-cache dcron &&
+        echo '0 * * * * /scripts/backup.sh >> /var/log/backup.log 2>&1' | crontab - &&
+        crond -f -l 2
+      "
+    restart: unless-stopped
